@@ -1,0 +1,735 @@
+Code.gs
+
+
+/**
+ * Aqua Clean Employee Suggestion & Request Portal
+ * Optimized for Reliable Background Uploads & Row Tracking
+ */
+
+const SHEET_ID = '1oM4e4ft29rsV2erkk1k2HcHbAgW7edp_AOM5dTV08bE';
+const FOLDER_ID = '1c9RtT0S0AwdhYE5OOApKfjfNntQeCQjg';
+const RECAPTCHA_SECRET = '6Lc-iUItAAAAAP2g_FKsRtF_Y8GXUroE6kuVNoUX';
+
+function doGet() {
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setTitle('Aqua Clean Employee Portal')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function verifyReCaptcha(responseToken) {
+  const url = 'https://www.google.com/recaptcha/api/siteverify';
+  const payload = { secret: RECAPTCHA_SECRET, response: responseToken };
+  const options = { method: 'post', payload: payload, muteHttpExceptions: true };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+    return json.success === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Uploads a single file and appends its URL to a specific row
+ */
+function uploadFileToSpecificRow(fileData, rowNumber) {
+  try {
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    const decodedData = Utilities.base64Decode(fileData.base64.split(',')[1]);
+    const blob = Utilities.newBlob(decodedData, fileData.type, fileData.name);
+    const file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    const fileUrl = file.getUrl();
+    
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const sheet = ss.getSheets()[0];
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(h => h.toString().trim().toLowerCase());
+    const fileUrlIdx = headers.findIndex(h => h.includes('file') || h.includes('document') || h.includes('upload') || h.includes('url'));
+    
+    const colNum = (fileUrlIdx === -1 ? 11 : fileUrlIdx + 1);
+    const cell = sheet.getRange(rowNumber, colNum);
+    const currentVal = cell.getValue();
+    cell.setValue(currentVal ? currentVal + '\n' + fileUrl : fileUrl);
+    
+    return { success: true };
+  } catch (e) {
+    throw new Error('Background upload failed: ' + e.toString());
+  }
+}
+
+/**
+ * Saves form data instantly and returns the created row number
+ */
+function saveFormAndGetRow(formData, recatpchaToken) {
+  if (!verifyReCaptcha(recatpchaToken)) {
+    throw new Error('reCAPTCHA Verification Failed.');
+  }
+  
+  try {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const sheet = ss.getSheets()[0];
+    const lastColumn = Math.max(sheet.getLastColumn(), 11);
+    const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(h => h.toString().trim().toLowerCase());
+    
+    let salaryIdx = headers.findIndex(h => h.includes('salary') || h.includes('id') || h.includes('code') || h.includes('emp'));
+    let phoneIdx = headers.findIndex(h => h.includes('phone') || h.includes('mobile'));
+    let statusIdx = headers.findIndex(h => h.includes('status'));
+    let requestIdx = headers.findIndex(h => h.includes('request for') || h.includes('complain') || h.includes('detail') || h.includes('message'));
+    let priorityIdx = headers.findIndex(h => h.includes('priority'));
+    let dateIdx = headers.findIndex(h => h.includes('date'));
+    let roomIdx = headers.findIndex(h => h.includes('room'));
+    let feedbackIdx = headers.findIndex(h => h.includes('feedback') || h.includes('reply') || h.includes('admin'));
+    let campIdx = headers.findIndex(h => h.includes('camp'));
+    let fileUrlIdx = headers.findIndex(h => h.includes('file') || h.includes('document') || h.includes('upload') || h.includes('url'));
+
+    if (salaryIdx === -1) salaryIdx = 0;
+    if (phoneIdx === -1) phoneIdx = 1;
+    if (statusIdx === -1) statusIdx = 2;
+    if (requestIdx === -1) requestIdx = 3;
+    if (priorityIdx === -1) priorityIdx = 4;
+    if (dateIdx === -1) dateIdx = 5;
+    if (roomIdx === -1) roomIdx = 6;
+    if (feedbackIdx === -1) feedbackIdx = 7;
+    if (campIdx === -1) campIdx = 8;
+    if (fileUrlIdx === -1) fileUrlIdx = 10;
+
+    const maxIndex = Math.max(salaryIdx, phoneIdx, statusIdx, requestIdx, priorityIdx, dateIdx, roomIdx, feedbackIdx, campIdx, fileUrlIdx);
+    const newRowData = new Array(maxIndex + 1).fill('');
+
+    newRowData[salaryIdx] = formData.salaryNumber;
+    newRowData[phoneIdx] = formData.phoneNumber;
+    newRowData[statusIdx] = 'Pending';
+    newRowData[requestIdx] = formData.requestFor;
+    newRowData[priorityIdx] = formData.priority;
+    newRowData[dateIdx] = formData.date;
+    newRowData[roomIdx] = formData.roomNumber;
+    newRowData[feedbackIdx] = ''; 
+    newRowData[campIdx] = formData.camp;
+    newRowData[fileUrlIdx] = ''; 
+    
+    sheet.appendRow(newRowData);
+    return { success: true, rowNumber: sheet.getLastRow() };
+  } catch (sheetError) {
+    throw new Error('Database write failed: ' + sheetError.toString());
+  }
+}
+
+function fetchRequestsBySalary(salaryNumber) {
+  try {
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const sheets = ss.getSheets();
+    const records = [];
+    const cleanSearch = salaryNumber.toString().trim().toLowerCase();
+    const searchDigits = cleanSearch.replace(/\D/g, ''); 
+    
+    sheets.forEach(sheet => {
+      const data = sheet.getDataRange().getValues();
+      if (data.length <= 1) return; 
+      const headers = data[0].map(h => h.toString().trim().toLowerCase());
+      
+      let reqIdx = headers.findIndex(h => h.includes('request') || h.includes('complain') || h.includes('detail') || h.includes('message'));
+      let dateIdx = headers.findIndex(h => h.includes('date') || h.includes('time'));
+      let prioIdx = headers.findIndex(h => h.includes('priority') || h.includes('level'));
+      let feedIdx = headers.findIndex(h => h.includes('feedback') || h.includes('reply') || h.includes('comment'));
+      let statIdx = headers.findIndex(h => h.includes('status') || h.includes('state'));
+      
+      if (reqIdx === -1) reqIdx = 3;
+      if (dateIdx === -1) dateIdx = 5;
+      if (prioIdx === -1) prioIdx = 4;
+      if (feedIdx === -1) feedIdx = 7;
+      if (statIdx === -1) statIdx = 2;
+
+      for (let i = data.length - 1; i >= 1; i--) {
+        const row = data[i];
+        if (!row || row.length === 0) continue;
+        let isMatch = false;
+        for (let col = 0; col < row.length; col++) {
+          const cellValue = row[col];
+          if (cellValue === undefined || cellValue === null) continue;
+          const cleanCell = cellValue.toString().trim().toLowerCase();
+          const cellDigits = cleanCell.replace(/\D/g, '');
+          if (cleanCell === cleanSearch || (searchDigits !== '' && cellDigits === searchDigits) || (searchDigits !== '' && cleanCell.includes(searchDigits))) {
+            isMatch = true;
+            break; 
+          }
+        }
+        if (isMatch) {
+          records.push({
+            requestFor: row[reqIdx] ? row[reqIdx].toString() : 'N/A',
+            date: row[dateIdx] ? row[dateIdx].toString() : 'N/A',
+            priority: row[prioIdx] ? row[prioIdx].toString() : 'Low',
+            feedback: row[feedIdx] ? row[feedIdx].toString() : '',
+            status: row[statIdx] ? row[statIdx].toString() : 'Pending'
+          });
+        }
+      }
+    });
+    return records;
+  } catch (e) {
+    throw new Error('Search Engine failure: ' + e.toString());
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Aqua Clean Employee Portal | Submit & Check Status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  
+  <!-- SEO Meta Tags -->
+  <meta name="description" content="Official Aqua Clean Employee Suggestion & Request Portal. Submit suggestions, complaints, and track request status securely.">
+  <meta name="keywords" content="Aqua Clean, Employee Portal, Suggestion Portal, Request Tracking, Workplace Feedback">
+  <meta name="author" content="Aqua Clean">
+  <meta property="og:title" content="Aqua Clean Employee Portal">
+  <meta property="og:description" content="A secure platform for Aqua Clean employees to submit requests and track status.">
+  <meta property="og:type" content="website">
+
+  <link rel="icon" id="dynamicFavicon" href="https://i.imgur.com/y2wOlu7.png">
+
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/material_blue.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.19/css/intlTelInput.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.min.css">
+  
+  <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+
+  <style>
+    :root {
+      --primary: #0097A7;
+      --secondary: #00BCD4;
+      --success: #28A745;
+      --danger: #DC3545;
+      --warning: #FFC107;
+      --bg-portal: #F5F7FA;
+      --text-main: #2C3E50;
+      --text-muted: #7F8C8D;
+      --white: #FFFFFF;
+      --radius-lg: 16px;
+      --radius-md: 8px;
+      --shadow-sm: 0 4px 6px -1px rgba(0,0,0,0.05);
+      --shadow-md: 0 10px 15px -3px rgba(0,0,0,0.08);
+      --transition: all 0.25s ease-in-out;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Poppins', sans-serif; -webkit-tap-highlight-color: transparent; }
+    body { 
+      background-color: var(--bg-portal); 
+      color: var(--text-main); 
+      line-height: 1.6; 
+      padding-bottom: 80px; 
+      overflow-x: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+    }
+    
+    header { background: var(--white); box-shadow: var(--shadow-sm); position: sticky; top: 0; z-index: 100; padding: 12px 24px; }
+    .header-container { max-width: 810px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; cursor: pointer; }
+    .brand img { height: 50px; width: auto; object-fit: contain; }
+    .brand h1 { font-size: 1.2rem; color: var(--primary); font-weight: 600; }
+    
+    .emergency-contact { background: #E1F5FE; border: 1px solid #B3E5FC; padding: 6px 14px; border-radius: var(--radius-md); font-weight: 700; color: #0288D1; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; transition: var(--transition); font-size: 0.95rem; }
+    .emergency-contact:hover { background: #0288D1; color: var(--white); }
+
+    main { max-width: 850px; margin: 24px auto; padding: 0 16px; }
+    .tab-navigator { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+    .tab-btn { background: var(--white); border: 1px solid #E2E8F0; padding: 12px 6px; border-radius: var(--radius-md); font-size: 0.95rem; font-weight: 600; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: var(--shadow-sm); transition: var(--transition); }
+    .tab-btn.active { background: var(--primary); color: var(--white); border-color: var(--primary); }
+
+    .view-section { display: none; opacity: 0; transform: translateY(10px); transition: opacity 0.3s ease, transform 0.3s ease; }
+    .view-section.active { display: block; opacity: 1; transform: translateY(0); }
+    .portal-card { background: var(--white); border-radius: var(--radius-lg); padding: 24px; box-shadow: var(--shadow-md); width: 100%; }
+    .card-title { font-size: 1.25rem; color: var(--primary); margin-bottom: 20px; border-bottom: 2px solid #EBF5F7; padding-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 680px) { 
+      .form-grid { grid-template-columns: 1fr; }
+      .header-container { flex-direction: column; align-items: flex-start; justify-content: flex-start; }
+      .emergency-contact { width: 100%; justify-content: center; }
+    }
+    .form-group { margin-bottom: 16px; display: flex; flex-direction: column; }
+    .form-group.full-width { grid-column: 1 / -1; }
+    label { font-weight: 500; font-size: 0.88rem; margin-bottom: 5px; color: var(--text-main); }
+    label .req { color: var(--danger); }
+
+    input[type="text"], select { width: 100%; padding: 11px; border: 1.5px solid #DCE4EC; border-radius: var(--radius-md); font-size: 0.95rem; color: var(--text-main); background: var(--bg-portal); outline: none; }
+    input[type="text"]:focus, select:focus { border-color: var(--secondary); background: var(--white); }
+    
+    .highlight-textarea { width: 100%; padding: 14px; border: 2px solid #B2EBF2 !important; border-radius: var(--radius-md); font-size: 0.98rem; color: var(--text-main); background: #F0FBFD !important; transition: var(--transition); outline: none; min-height: 160px; resize: vertical; }
+    .highlight-textarea:focus { background: var(--white) !important; border-color: var(--primary) !important; box-shadow: 0 0 8px rgba(0,151,167,0.2); }
+    
+    .iti { width: 100% !important; }
+
+    .corporate-btn { background: var(--primary); color: var(--white); border: none; padding: 12px 24px; font-size: 0.95rem; font-weight: 600; border-radius: var(--radius-md); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: var(--transition); width: 100%; border-bottom: 3px solid #007c8a; }
+    .corporate-btn:hover { background: #00838F; transform: translateY(-1px); }
+
+    .file-dropzone { border: 2px dashed #B2EBF2; background: #F0FBFD; border-radius: var(--radius-md); padding: 25px; text-align: center; position: relative; transition: var(--transition); }
+    .file-dropzone:hover { background: #E0F7FA; border-color: var(--primary); }
+    .file-dropzone input[type="file"] { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+
+    .file-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .file-item { display: flex; align-items: center; justify-content: space-between; background: #FFFFFF; border: 1px solid #E0E0E0; padding: 8px 12px; border-radius: var(--radius-md); font-size: 0.85rem; }
+    .file-info { display: flex; align-items: center; gap: 10px; }
+    .file-icon { color: var(--primary); font-size: 1.1rem; }
+    .remove-file-btn { color: var(--danger); cursor: pointer; font-size: 1rem; transition: var(--transition); }
+    .remove-file-btn:hover { color: #c82333; }
+
+    .progress-container { display: none; margin-top: 15px; background: #ECEFF1; border-radius: 20px; overflow: hidden; position: relative; height: 6px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); }
+    .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #0097A7, #00BCD4); transition: width 0.3s ease; border-radius: 20px; }
+
+    .recaptcha-wrapper { margin: 12px 0; display: flex; justify-content: flex-start; width: 100%; overflow-x: auto; }
+    .search-panel { display: flex; gap: 10px; margin-bottom: 20px; width: 100%; }
+    .search-panel input { flex: 1; min-width: 0; }
+    .search-panel .corporate-btn { width: auto; flex-shrink: 0; }
+
+    /* TABLE RESPONSIVE STYLE */
+    .table-responsive-wrapper { width: 100%; background: var(--white); border-radius: var(--radius-md); border: 1px solid #E2E8F0; margin-top: 10px; }
+    .corporate-data-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.88rem; }
+    .corporate-data-table th { background-color: #F8FAFC; color: var(--text-main); font-weight: 600; padding: 12px 14px; border-bottom: 2px solid #E2E8F0; }
+    .corporate-data-table td { padding: 12px 14px; border-bottom: 1px solid #E2E8F0; vertical-align: top; color: var(--text-main); word-break: break-word; }
+    .corporate-data-table tr:last-child td { border-bottom: none; }
+    .corporate-data-table tr:hover { background-color: #F8FAFC; }
+
+    .feedback-highlight-box { background: #FFFDE7; border: 1px solid #FFF59D; border-left: 4px solid var(--warning); padding: 6px 10px; border-radius: 6px; color: #7F5F00; font-weight: 500; font-size: 0.82rem; margin-top: 2px; max-width: 100%; }
+
+    .status-badge { font-size: 0.72rem; font-weight: 600; padding: 4px 10px; border-radius: 12px; text-transform: uppercase; color: var(--white); display: inline-flex; align-items: center; gap: 5px; text-align: center; white-space: nowrap; }
+    .status-pending { background-color: #28a759; }
+    .status-canceled { background-color: #9a35dc; }
+    .status-approved { background-color: #92af14; }
+    .status-completed { background-color: #000000; }
+    .status-requested { background-color: #fb1010; }
+    .status-scheduled { background-color: #0056b3; }
+    .no-data { text-align: center; padding: 30px; color: var(--text-muted); font-size: 0.95rem; width: 100%; }
+
+    footer { position: fixed; bottom: 0; left: 0; width: 100%; background: var(--white); border-top: 1px solid #EBF5F7; text-align: center; padding: 10px; font-size: 0.8rem; color: var(--text-muted); z-index: 100; }
+
+    @media (max-width: 680px) {
+      .table-responsive-wrapper { border: none; }
+      .corporate-data-table, .corporate-data-table thead, .corporate-data-table tbody, .corporate-data-table th, .corporate-data-table td, .corporate-data-table tr { display: block; }
+      .corporate-data-table thead { display: none; }
+      .corporate-data-table tr { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: var(--radius-md); padding: 12px; margin-bottom: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+      .corporate-data-table td { text-align: right; padding: 6px 0; border-bottom: 1px dashed #F1F5F9; position: relative; padding-left: 45%; font-size: 0.85rem; }
+      .corporate-data-table td:last-child { border-bottom: none; }
+      .corporate-data-table td::before { content: attr(data-label); position: absolute; left: 0; width: 40%; text-align: left; font-weight: 600; color: var(--text-main); }
+      .feedback-highlight-box { display: inline-block; text-align: left; }
+    }
+
+    @media (max-width: 500px) {
+      header { padding: 10px 14px; }
+      .brand img { height: 40px; }
+      .brand h1 { font-size: 1rem; }
+      .tab-btn { font-size: 0.85rem; padding: 10px 4px; gap: 4px; }
+      .portal-card { padding: 16px; }
+      .card-title { font-size: 1.1rem; }
+    }
+  </style>
+</head>
+<body oncontextmenu="return false;">
+
+  <header>
+    <div class="header-container">
+      <a href="https://aqua.olkite.com/" target="_blank" class="brand">
+        <img src="https://i.imgur.com/y2wOlu7.png" alt="Aqua Clean Logo">
+        <h1>Aqua Clean Employee Portal</h1>
+      </a>
+      <a href="tel:44363994" class="emergency-contact">
+        <i class="fa-solid fa-phone-flip"></i> 4436 3994
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <div class="tab-navigator">
+      <button class="tab-btn active" id="tabSubmit" onclick="switchView('submit-section', this)">
+        <i class="fa-solid fa-paper-plane"></i> Submit Request
+      </button>
+      <button class="tab-btn" id="tabTrack" onclick="switchView('track-section', this)">
+        <i class="fa-solid fa-magnifying-glass"></i> Check Status
+      </button>
+    </div>
+
+    <section id="submit-section" class="view-section active">
+      <div class="portal-card">
+        <h2 class="card-title"><i class="fa-solid fa-pen-to-square"></i> Fill up this form and submit:</h2>
+        
+        <form id="requestForm" onsubmit="handleFormSubmit(event)">
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="salaryNumber">Salary Number <span class="req">*</span></label>
+              <input type="text" id="salaryNumber" placeholder="Enter Your Salary Number Ex: ACW4156" required oninput="saveDraft()">
+            </div>
+            <div class="form-group">
+              <label for="datePicker">Date <span class="req">*</span></label>
+              <input type="text" id="datePicker" required onchange="saveDraft()">
+            </div>
+            <div class="form-group full-width">
+              <label for="phoneNumber">Phone Number <span class="req">*</span></label>
+              <input type="text" id="phoneNumber" required oninput="saveDraft()">
+            </div>
+            <div class="form-group">
+              <label for="priority">Priority</label>
+              <select id="priority" onchange="saveDraft()">
+                <option value="Low" selected>Low</option>
+                <option value="Medium">Medium</option>
+                <option value="High">High</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="camp">Camp <span class="req">*</span></label>
+              <select id="camp" required onchange="saveDraft()">
+                <option value="" disabled selected>Select Camp Location</option>
+                <option value="Barwa">Barwa</option>
+                <option value="Ezdan">Ezdan</option>
+                <option value="Gharrafa">Gharrafa</option>
+              </select>
+            </div>
+            <div class="form-group full-width">
+              <label for="roomNumber">Room Number</label>
+              <input type="text" id="roomNumber" placeholder="Enter Your Room No." oninput="saveDraft()">
+            </div>
+            <div class="form-group full-width">
+              <label for="requestFor" style="font-weight:600; color:var(--primary);">Request / Complaint Details <span class="req">*</span></label>
+              <textarea id="requestFor" class="highlight-textarea" placeholder="Please write down your detailed request or message here directly..." required oninput="saveDraft()"></textarea>
+            </div>
+            <div class="form-group full-width">
+              <label>Upload Document / Media <span style="font-weight: normal; color: var(--text-muted);">(Optional - Max 20MB per file)</span></label>
+              <div class="file-dropzone">
+                <i class="fa-solid fa-file-circle-plus" style="font-size:2rem; color:var(--primary); margin-bottom:10px; display:block;"></i>
+                <p style="font-size:0.95rem; font-weight:600; color:var(--primary);" id="file-status-label">Click to Attach Documents</p>
+                <span style="font-size:0.8rem; color:var(--text-muted);">Supports PDF, Images, Videos</span>
+                <input type="file" id="fileAttachment" multiple onchange="processSelectedFiles(this)">
+              </div>
+              <div id="fileListContainer" class="file-list"></div>
+            </div>
+          </div>
+          <div class="recaptcha-wrapper">
+            <div class="g-recaptcha" data-sitekey="6Lc-iUItAAAAALdRkb0M_0kXNeWKiCcKKSqOkVVL" data-callback="captchaVerified" data-expired-callback="captchaExpired"></div>
+          </div>
+          <button type="submit" class="corporate-btn" id="submitBtn">
+            <i class="fa-solid fa-paper-plane"></i> Submit Your Request
+          </button>
+          <div class="progress-container" id="progressWrapper">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="track-section" class="view-section">
+      <div class="portal-card">
+        <h2 class="card-title"><i class="fa-solid fa-magnifying-glass"></i> Check My Request Status</h2>
+        <div class="search-panel">
+          <input type="text" id="searchSalary" placeholder="Enter Your Salary Number Ex: ACW4524">
+          <button class="corporate-btn" onclick="executeTrackingSearch(event)" id="searchBtn">
+            <i class="fa-solid fa-magnifying-glass"></i> Search
+          </button>
+        </div>
+        <div id="trackingResults">
+          <div class="no-data">Enter your Salary Number above to view submitted records dynamically.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    &copy; <span id="currentYear"></span> | Developed by <a href="https://aqua.olkite.com/" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">Hassan</a>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.19/js/intlTelInput.min.js"></script>
+
+  <script>
+    let itiInstance;
+    let base64FilesArray = []; 
+    let verifiedCaptchaToken = null;
+    let isUploading = false;
+
+    document.addEventListener("DOMContentLoaded", function() {
+      document.getElementById('currentYear').textContent = new Date().getFullYear();
+      updateDynamicFavicon();
+      triggerWelcomePopup();
+      flatpickr("#datePicker", { defaultDate: "today", dateFormat: "d/m/Y", maxDate: "today", allowInput: false });
+      const phoneInputField = document.querySelector("#phoneNumber");
+      itiInstance = window.intlTelInput(phoneInputField, { initialCountry: "qa", preferredCountries: ["qa"], separateDialCode: true, utilsScript: "https://cdnjs.cloudflare.com/ajax/libs/intl-tel-input/17.0.19/js/utils.js" });
+      loadDraft();
+      
+      window.addEventListener('beforeunload', (event) => {
+        if (isUploading) {
+          event.preventDefault();
+          event.returnValue = '';
+        }
+      });
+      
+      window.history.pushState(null, null, window.location.href);
+      window.onpopstate = function() {
+        if (isUploading) window.history.pushState(null, null, window.location.href);
+      };
+    });
+
+    function saveDraft() {
+      const draft = {
+        salaryNumber: document.getElementById('salaryNumber').value,
+        date: document.getElementById('datePicker').value,
+        phoneNumber: document.getElementById('phoneNumber').value,
+        priority: document.getElementById('priority').value,
+        camp: document.getElementById('camp').value,
+        roomNumber: document.getElementById('roomNumber').value,
+        requestFor: document.getElementById('requestFor').value
+      };
+      localStorage.setItem('aquaCleanDraft', JSON.stringify(draft));
+    }
+
+    function loadDraft() {
+      const saved = localStorage.getItem('aquaCleanDraft');
+      if (saved) {
+        const draft = JSON.parse(saved);
+        document.getElementById('salaryNumber').value = draft.salaryNumber || '';
+        document.getElementById('datePicker').value = draft.date || '';
+        document.getElementById('phoneNumber').value = draft.phoneNumber || '';
+        document.getElementById('priority').value = draft.priority || 'Low';
+        document.getElementById('camp').value = draft.camp || '';
+        document.getElementById('roomNumber').value = draft.roomNumber || '';
+        document.getElementById('requestFor').value = draft.requestFor || '';
+      }
+    }
+
+    async function updateDynamicFavicon() {
+      const favicon = document.getElementById('dynamicFavicon');
+      try {
+        const response = await fetch('https://ipapi.co/json/');
+        const data = await response.json();
+        const country = data.country_code;
+        if (country === 'QA') favicon.href = 'https://flagcdn.com/32x24/qa.png';
+        else if (country === 'IN') favicon.href = 'https://flagcdn.com/32x24/in.png';
+      } catch (e) { console.error('Favicon detection failed', e); }
+    }
+
+    function triggerWelcomePopup() {
+      if (sessionStorage.getItem('aquaCleanPortalVisited')) return;
+      const hrs = new Date().getHours();
+      let dynamicTimeGreeting = (hrs < 12) ? "Good Morning" : (hrs < 17) ? "Good Afternoon" : "Good Evening";
+      Swal.fire({
+        html: `<div style="text-align: left; font-family:'Poppins',sans-serif; color:#2C3E50;"><div style="text-align:center; margin-bottom:15px;"><img src="https://i.imgur.com/y2wOlu7.png" style="max-height:55px;" alt="Logo"></div><h3 style="color:#0097A7; font-size:1.15rem; margin-bottom:10px; border-bottom:1px solid #EBF5F7; padding-bottom:5px;">Assalamu Alaikum, ${dynamicTimeGreeting},</h3><p style="font-weight:600; margin-bottom:6px; color:#34495E;">Dear Employee,</p><p style="margin-bottom:10px; font-size:0.92rem;">I hope you are doing well.</p><p style="margin-bottom:12px; font-size:0.92rem; line-height:1.6; text-align:justify;">Welcome to the <strong>Aqua Clean Employee Suggestion & Request Portal</strong>.</p><p style="margin-bottom:12px; font-size:0.92rem; line-height:1.6; text-align:justify; color:#566573;">Please feel free to submit your suggestions, concerns, or requests without any fear or hesitation. We value your feedback, and our team will review and respond as soon as possible.</p><p style="font-size:0.92rem; font-weight:500; border-top:1px dashed #D5DBDB; padding-top:8px; margin-top:8px;">Thank you for being a valued member of Aqua Clean. Have a great day!</p></div>`,
+        showConfirmButton: false, showCloseButton: true, timer: 26000, timerProgressBar: true
+      });
+      sessionStorage.setItem('aquaCleanPortalVisited', 'true');
+    }
+
+    function switchView(targetSectionId, elementPointer) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      elementPointer.classList.add('active');
+      document.querySelectorAll('.view-section').forEach(sec => { sec.classList.remove('active'); sec.style.opacity = '0'; });
+      const dest = document.getElementById(targetSectionId);
+      dest.classList.add('active');
+      setTimeout(() => { dest.style.opacity = '1'; }, 40);
+    }
+
+    function captchaVerified(token) { verifiedCaptchaToken = token; }
+    function captchaExpired() { verifiedCaptchaToken = null; }
+
+    function processSelectedFiles(fileInput) {
+      const files = fileInput.files;
+      if (!files || files.length === 0) return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const fileId = 'file-' + Date.now() + '-' + i;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          base64FilesArray.push({ base64: e.target.result, name: file.name, type: file.type, id: fileId });
+          addFileToUI(file, fileId);
+        };
+        reader.readAsDataURL(file);
+      }
+      fileInput.value = ''; 
+    }
+
+    function addFileToUI(file, fileId) {
+      const container = document.getElementById('fileListContainer');
+      const fileItem = document.createElement('div');
+      fileItem.className = 'file-item';
+      fileItem.id = fileId;
+      let iconClass = file.type.includes('image') ? 'fa-file-image' : file.type.includes('video') ? 'fa-file-video' : file.type.includes('pdf') ? 'fa-file-pdf' : 'fa-file';
+      fileItem.innerHTML = `<div class="file-info"><i class="fa-solid ${iconClass} file-icon"></i><span>${file.name}</span></div><i class="fa-solid fa-circle-xmark remove-file-btn" onclick="removeFile('${fileId}')"></i>`;
+      container.appendChild(fileItem);
+      document.getElementById('file-status-label').textContent = 'Files attached';
+    }
+
+    function removeFile(fileId) {
+      const element = document.getElementById(fileId);
+      if (element) element.remove();
+      base64FilesArray = base64FilesArray.filter(f => f.id !== fileId);
+      const container = document.getElementById('fileListContainer');
+      if (container.children.length === 0) document.getElementById('file-status-label').textContent = 'Click to Attach Documents';
+    }
+
+    function formatSalaryNumber(val) {
+      let clean = val.trim().toUpperCase().replace(/\s+/g, '');
+      return /^\d+$/.test(clean) ? 'ACW' + clean : clean;
+    }
+
+    function isValidSalaryNumber(val) {
+      let formatted = formatSalaryNumber(val);
+      return /^(HQS|ACW|AMR)\d{3,4}$/i.test(formatted);
+    }
+
+    async function handleFormSubmit(event) {
+      event.preventDefault();
+      const rawSalary = document.getElementById('salaryNumber').value;
+      if (!isValidSalaryNumber(rawSalary)) { Swal.fire('Invalid Format', 'Check Salary Number.', 'error'); return; }
+      if (!itiInstance.isValidNumber()) { Swal.fire('Invalid Phone', 'Check Phone Number.', 'error'); return; }
+      if (!verifiedCaptchaToken) { Swal.fire('reCAPTCHA', 'Please verify.', 'warning'); return; }
+
+      isUploading = true;
+      setLoadingState('submitBtn', true, 'Submitting... Please wait');
+      
+      // START PROGRESS IMMEDIATELY
+      updateProgress(5);
+      let currentProgress = 5;
+      const progressInterval = setInterval(() => {
+        if (currentProgress < 98) {
+          currentProgress += 0.8; 
+          updateProgress(currentProgress);
+        }
+      }, 300);
+
+      const payloadData = {
+        salaryNumber: formatSalaryNumber(rawSalary),
+        date: document.getElementById('datePicker').value,
+        phoneNumber: itiInstance.getNumber(),
+        priority: document.getElementById('priority').value,
+        camp: document.getElementById('camp').value,
+        roomNumber: document.getElementById('roomNumber').value.trim() || 'N/A',
+        requestFor: document.getElementById('requestFor').value.trim()
+      };
+
+      // STEP 1: Save Form & Get Exact Row Number
+      google.script.run
+        .withSuccessHandler(async response => {
+          const rowNumber = response.rowNumber;
+          localStorage.removeItem('aquaCleanDraft');
+          
+          // Show Success after a slight delay
+          setTimeout(() => {
+            Swal.fire({ 
+              icon: 'success', 
+              title: 'Request Received!', 
+              html: `<p style="margin-bottom:15px;">Our team will respond very soon.</p><button onclick="goToStatus()" class="corporate-btn" style="width:auto; padding:8px 20px; font-size:0.9rem;"><i class="fa-solid fa-magnifying-glass"></i> Check My Status</button>`,
+              showConfirmButton: false, showCloseButton: true, confirmButtonColor: '#0097A7' 
+            });
+          }, 1500);
+
+          // STEP 2: Upload Files to the Specific Row
+          if (base64FilesArray.length > 0) {
+            const filesToUpload = [...base64FilesArray];
+            base64FilesArray = []; 
+            for (const file of filesToUpload) {
+              await new Promise((resolve, reject) => {
+                google.script.run
+                  .withSuccessHandler(resolve)
+                  .withFailureHandler(reject)
+                  .uploadFileToSpecificRow(file, rowNumber);
+              });
+            }
+          }
+
+          clearInterval(progressInterval);
+          updateProgress(100);
+          isUploading = false;
+          setLoadingState('submitBtn', false);
+          document.getElementById('requestForm').reset();
+          document.getElementById('fileListContainer').innerHTML = '';
+          document.getElementById('file-status-label').textContent = 'Click to Attach Documents';
+          if(window.grecaptcha) grecaptcha.reset();
+          verifiedCaptchaToken = null;
+        })
+        .withFailureHandler(err => { clearInterval(progressInterval); isUploading = false; setLoadingState('submitBtn', false); Swal.fire('Error', err.message, 'error'); })
+        .saveFormAndGetRow(payloadData, verifiedCaptchaToken);
+    }
+
+    function goToStatus() { Swal.close(); const trackBtn = document.getElementById('tabTrack'); switchView('track-section', trackBtn); }
+
+    function updateProgress(percent) {
+      const progressBar = document.getElementById("progressBar");
+      progressBar.style.width = Math.round(percent) + "%";
+    }
+
+    function executeTrackingSearch(event) {
+      event.preventDefault();
+      const rawSearch = document.getElementById('searchSalary').value.trim();
+      if (!rawSearch) { Swal.fire('Input Required', 'Enter Salary ID.', 'warning'); return; }
+      const searchVal = formatSalaryNumber(rawSearch);
+      setLoadingState('searchBtn', true, '<i class="fa-solid fa-spinner fa-spin"></i> Loading...');
+      const resultsContainer = document.getElementById('trackingResults');
+      resultsContainer.innerHTML = '';
+      google.script.run
+        .withSuccessHandler(records => {
+          setLoadingState('searchBtn', false, '<i class="fa-solid fa-magnifying-glass"></i> Search');
+          if (!records || records.length === 0) { resultsContainer.innerHTML = '<div class="no-data">No records found.</div>'; return; }
+          const hasFeedback = records.some(item => item.feedback && item.feedback.trim() !== '');
+          let tableHtml = `<div class="table-responsive-wrapper"><table class="corporate-data-table"><thead><tr><th>Request For</th><th>Date</th><th>Priority</th>${hasFeedback ? '<th>Feedback</th>' : ''}<th>Status</th></tr></thead><tbody>`;
+          records.forEach(item => {
+            const statusStr = (item.status || 'Pending').trim().toLowerCase();
+            let statusClass = 'status-pending';
+            let statusIcon = '<i class="fa-solid fa-clock fa-spin"></i>';
+            if (statusStr === 'canceled') { statusClass = 'status-canceled'; statusIcon = ''; }
+            else if (statusStr === 'approved') { statusClass = 'status-approved'; statusIcon = ''; }
+            else if (statusStr === 'scheduled') { statusClass = 'status-scheduled'; statusIcon = ''; }
+            else if (statusStr === 'requested') { statusClass = 'status-requested'; statusIcon = ''; }
+            else if (statusStr === 'completed') { statusClass = 'status-completed'; statusIcon = '<i class="fa-solid fa-circle-check"></i>'; }
+            tableHtml += `<tr><td data-label="Request For">${item.requestFor || 'N/A'}</td><td data-label="Date">${item.date || 'N/A'}</td><td data-label="Priority">${item.priority || 'Low'}</td>${hasFeedback ? `<td data-label="Feedback">${item.feedback ? `<div class="feedback-highlight-box">${item.feedback}</div>` : '—'}</td>` : ''}<td data-label="Status"><div class="status-badge ${statusClass}">${statusIcon} ${item.status || 'Pending'}</div></td></tr>`;
+          });
+          tableHtml += `</tbody></table></div>`;
+          resultsContainer.innerHTML = tableHtml;
+        })
+        .withFailureHandler(err => { setLoadingState('searchBtn', false, 'Search'); resultsContainer.innerHTML = `<div class="no-data">Error: ${err.message}</div>`; })
+        .fetchRequestsBySalary(searchVal);
+    }
+
+    function setLoadingState(elementId, isLoading, loaderText) {
+      const element = document.getElementById(elementId);
+      const progressWrapper = document.getElementById("progressWrapper");
+      if (isLoading) {
+        element.disabled = true; element.dataset.originalHtml = element.innerHTML; element.innerHTML = loaderText;
+        if (elementId === "submitBtn") { progressWrapper.style.display = "block"; updateProgress(0); }
+      } else {
+        element.disabled = false; if(element.dataset.originalHtml) element.innerHTML = element.dataset.originalHtml;
+        if (elementId === "submitBtn") setTimeout(() => { progressWrapper.style.display = "none"; }, 1500);
+      }
+    }
+  </script>
+</body>
+</html>
